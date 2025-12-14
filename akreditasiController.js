@@ -229,6 +229,57 @@ export const exportData = async (req, res) => {
       // Export ke Excel dengan sheet berbeda untuk setiap type
       const workbook = XLSX.utils.book_new();
 
+      // Helper function to convert camelCase/snake_case to Title Case
+      const toTitleCase = (str) => {
+        return str
+          // Handle camelCase
+          .replace(/([A-Z])/g, ' $1')
+          // Handle snake_case
+          .replace(/_/g, ' ')
+          // Capitalize first letter of each word
+          .split(' ')
+          .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+          .join(' ')
+          .trim();
+      };
+
+      // Helper function to recursively flatten nested objects
+      const flattenObject = (obj, prefix = '') => {
+        const flattened = {};
+        
+        for (const key in obj) {
+          const value = obj[key];
+          const newKey = prefix ? `${prefix} ${toTitleCase(key)}` : toTitleCase(key);
+          
+          if (value === null || value === undefined || value === '') {
+            flattened[newKey] = '-';
+          } else if (typeof value === 'object' && !Array.isArray(value)) {
+            // Recursively flatten nested objects
+            Object.assign(flattened, flattenObject(value, newKey));
+          } else if (Array.isArray(value)) {
+            // Handle arrays
+            if (value.length === 0) {
+              flattened[newKey] = '-';
+            } else if (typeof value[0] === 'object') {
+              // Array of objects - join as readable string
+              flattened[newKey] = value.map((item, idx) => {
+                const itemStr = Object.entries(item)
+                  .map(([k, v]) => `${toTitleCase(k)}: ${v || '-'}`)
+                  .join(', ');
+                return `[${idx + 1}] ${itemStr}`;
+              }).join(' | ');
+            } else {
+              // Array of primitives
+              flattened[newKey] = value.join(', ');
+            }
+          } else {
+            flattened[newKey] = String(value);
+          }
+        }
+        
+        return flattened;
+      };
+
       // Process each type
       Object.keys(recordsByType).forEach(type => {
         const records = recordsByType[type];
@@ -238,35 +289,58 @@ export const exportData = async (req, res) => {
           const jsonData = record.data;
           
           if (jsonData && typeof jsonData === 'object') {
-            // Create a flattened object with all fields
-            const flatData = {
-              'Prodi': record.prodi || '',
-              'Tanggal Input': record.created_at ? new Date(record.created_at).toLocaleDateString('id-ID') : '',
+            // Base data
+            const baseData = {
+              'No': excelData.length + 1,
+              'Prodi': record.prodi || '-',
+              'Tanggal Input': record.created_at ? new Date(record.created_at).toLocaleDateString('id-ID') : '-',
+              'Tanggal Update': record.updated_at ? new Date(record.updated_at).toLocaleDateString('id-ID') : '-',
             };
 
-            // Add all fields from JSON data
-            Object.keys(jsonData).forEach(key => {
-              // Convert camelCase to Title Case
-              const label = key
-                .replace(/([A-Z])/g, ' $1')
-                .replace(/^./, str => str.toUpperCase())
-                .trim();
-              flatData[label] = jsonData[key] || '';
-            });
-
-            excelData.push(flatData);
+            // Process JSON data based on structure
+            if (Array.isArray(jsonData)) {
+              // If data is an array, process each item as separate row
+              if (jsonData.length === 0) {
+                excelData.push({ ...baseData, 'Data': '-' });
+              } else {
+                jsonData.forEach((item, idx) => {
+                  const rowData = { ...baseData };
+                  rowData['No'] = `${baseData['No']}.${idx + 1}`;
+                  
+                  if (typeof item === 'object') {
+                    // Flatten the object
+                    const flattened = flattenObject(item);
+                    Object.assign(rowData, flattened);
+                  } else {
+                    rowData['Data'] = String(item);
+                  }
+                  
+                  excelData.push(rowData);
+                });
+              }
+            } else if (typeof jsonData === 'object') {
+              // If data is an object, flatten it
+              const flattened = flattenObject(jsonData);
+              excelData.push({ ...baseData, ...flattened });
+            }
           }
         });
 
         if (excelData.length > 0) {
           const worksheet = XLSX.utils.json_to_sheet(excelData);
           
-          // Set column widths
-          const cols = Object.keys(excelData[0]).map(() => ({ wch: 20 }));
+          // Set column widths dynamically based on content
+          const cols = Object.keys(excelData[0]).map(key => {
+            const maxLength = Math.max(
+              key.length,
+              ...excelData.map(row => String(row[key] || '').length)
+            );
+            return { wch: Math.min(Math.max(maxLength, 10), 50) };
+          });
           worksheet['!cols'] = cols;
 
           // Create sheet name (capitalize and limit to 31 chars for Excel)
-          const sheetName = type.charAt(0).toUpperCase() + type.slice(1);
+          const sheetName = toTitleCase(type);
           const truncatedName = sheetName.substring(0, 31);
           
           XLSX.utils.book_append_sheet(workbook, worksheet, truncatedName);
