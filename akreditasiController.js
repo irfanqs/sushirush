@@ -232,45 +232,50 @@ export const exportData = async (req, res) => {
       // Helper function to convert camelCase/snake_case to Title Case
       const toTitleCase = (str) => {
         return str
-          // Handle camelCase
           .replace(/([A-Z])/g, ' $1')
-          // Handle snake_case
           .replace(/_/g, ' ')
-          // Capitalize first letter of each word
           .split(' ')
           .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
           .join(' ')
           .trim();
       };
 
-      // Helper function to recursively flatten nested objects
-      const flattenObject = (obj, prefix = '') => {
+      // Helper to check if a value is truly empty
+      const isEmpty = (val) => {
+        if (val === null || val === undefined || val === '') return true;
+        if (typeof val === 'string' && val.trim() === '') return true;
+        if (Array.isArray(val) && val.length === 0) return true;
+        if (typeof val === 'object' && Object.keys(val).length === 0) return true;
+        return false;
+      };
+
+      // Helper to recursively flatten nested objects (untuk SPMI dan data kompleks)
+      const flattenNestedObject = (obj, prefix = '') => {
         const flattened = {};
         
         for (const key in obj) {
           const value = obj[key];
-          const newKey = prefix ? `${prefix} ${toTitleCase(key)}` : toTitleCase(key);
+          const newKey = prefix ? `${prefix} > ${toTitleCase(key)}` : toTitleCase(key);
           
-          if (value === null || value === undefined || value === '') {
+          if (isEmpty(value)) {
             flattened[newKey] = '-';
           } else if (typeof value === 'object' && !Array.isArray(value)) {
             // Recursively flatten nested objects
-            Object.assign(flattened, flattenObject(value, newKey));
+            const nested = flattenNestedObject(value, newKey);
+            Object.assign(flattened, nested);
           } else if (Array.isArray(value)) {
             // Handle arrays
-            if (value.length === 0) {
-              flattened[newKey] = '-';
-            } else if (typeof value[0] === 'object') {
-              // Array of objects - join as readable string
-              flattened[newKey] = value.map((item, idx) => {
-                const itemStr = Object.entries(item)
-                  .map(([k, v]) => `${toTitleCase(k)}: ${v || '-'}`)
-                  .join(', ');
-                return `[${idx + 1}] ${itemStr}`;
-              }).join(' | ');
-            } else {
+            if (value.every(item => typeof item !== 'object')) {
               // Array of primitives
               flattened[newKey] = value.join(', ');
+            } else {
+              // Array of objects - convert to readable string
+              flattened[newKey] = value.map((item, idx) => {
+                if (typeof item === 'object') {
+                  return `[${idx + 1}] ${Object.entries(item).map(([k, v]) => `${k}: ${v}`).join(', ')}`;
+                }
+                return item;
+              }).join(' | ');
             }
           } else {
             flattened[newKey] = String(value);
@@ -280,64 +285,144 @@ export const exportData = async (req, res) => {
         return flattened;
       };
 
-      // Process each type
+      // Process each type - dengan handling khusus untuk SPMI
       Object.keys(recordsByType).forEach(type => {
         const records = recordsByType[type];
-        const excelData = [];
+        const allRows = [];
 
         records.forEach((record) => {
           const jsonData = record.data;
           
-          if (jsonData && typeof jsonData === 'object') {
-            // Base data
-            const baseData = {
-              'No': excelData.length + 1,
-              'Prodi': record.prodi || '-',
-              'Tanggal Input': record.created_at ? new Date(record.created_at).toLocaleDateString('id-ID') : '-',
-              'Tanggal Update': record.updated_at ? new Date(record.updated_at).toLocaleDateString('id-ID') : '-',
-            };
+          if (!jsonData) return; // Skip if no data
+          
+          // Common fields for all rows
+          const commonFields = {
+            'Prodi': record.prodi || '-',
+            'Tanggal Input': record.created_at ? new Date(record.created_at).toLocaleDateString('id-ID') : '-',
+            'Tanggal Update': record.updated_at ? new Date(record.updated_at).toLocaleDateString('id-ID') : '-',
+          };
 
-            // Process JSON data based on structure
-            if (Array.isArray(jsonData)) {
-              // If data is an array, process each item as separate row
-              if (jsonData.length === 0) {
-                excelData.push({ ...baseData, 'Data': '-' });
+          // SPECIAL HANDLING FOR SPMI - nested array structure [{id, data: {...}}]
+          if (type === 'spmi' && Array.isArray(jsonData)) {
+            jsonData.forEach((item) => {
+              if (!item || typeof item !== 'object') return;
+              
+              // SPMI has nested structure: {id, data: {...}}
+              const actualData = item.data || item;
+              
+              const hasData = Object.values(actualData).some(val => !isEmpty(val));
+              if (!hasData) return;
+              
+              const row = { ...commonFields };
+              const flattened = flattenNestedObject(actualData);
+              Object.assign(row, flattened);
+              allRows.push(row);
+            });
+            return; // Skip normal processing
+          }
+
+          // Handle single object (data saved as single object instead of array)
+          if (typeof jsonData === 'object' && !Array.isArray(jsonData)) {
+            const hasData = Object.values(jsonData).some(val => !isEmpty(val));
+            if (!hasData) return;
+            
+            const row = { ...commonFields };
+            
+            // Add all fields directly
+            Object.keys(jsonData).forEach(key => {
+              const value = jsonData[key];
+              const columnName = toTitleCase(key);
+              
+              if (isEmpty(value)) {
+                row[columnName] = '-';
+              } else if (Array.isArray(value)) {
+                row[columnName] = value.join(', ');
+              } else if (typeof value === 'object') {
+                row[columnName] = JSON.stringify(value);
               } else {
-                jsonData.forEach((item, idx) => {
-                  const rowData = { ...baseData };
-                  rowData['No'] = `${baseData['No']}.${idx + 1}`;
-                  
-                  if (typeof item === 'object') {
-                    // Flatten the object
-                    const flattened = flattenObject(item);
-                    Object.assign(rowData, flattened);
-                  } else {
-                    rowData['Data'] = String(item);
-                  }
-                  
-                  excelData.push(rowData);
-                });
+                row[columnName] = String(value);
               }
-            } else if (typeof jsonData === 'object') {
-              // If data is an object, flatten it
-              const flattened = flattenObject(jsonData);
-              excelData.push({ ...baseData, ...flattened });
-            }
+            });
+            
+            allRows.push(row);
+            return; // Done processing this record
+          }
+
+          // Handle array data (like tupoksi - should be array of flat objects)
+          if (Array.isArray(jsonData)) {
+            jsonData.forEach((item) => {
+              // Skip empty items
+              if (!item || typeof item !== 'object') return;
+              
+              // Check if item has at least one non-empty value
+              const hasData = Object.values(item).some(val => !isEmpty(val));
+              if (!hasData) return;
+              
+              // Create row with common fields + data fields
+              const row = { ...commonFields };
+              
+              // Flatten the item recursively to handle nested objects
+              const flattenItem = (obj, prefix = '') => {
+                Object.keys(obj).forEach(key => {
+                  const value = obj[key];
+                  const columnName = prefix ? `${prefix} ${toTitleCase(key)}` : toTitleCase(key);
+                  
+                  // Handle different value types
+                  if (isEmpty(value)) {
+                    row[columnName] = '-';
+                  } else if (Array.isArray(value)) {
+                    // Check if array contains objects
+                    if (value.length > 0 && typeof value[0] === 'object') {
+                      // Array of objects - convert to readable format
+                      row[columnName] = value.map((v, idx) => {
+                        const entries = Object.entries(v).map(([k, val]) => `${toTitleCase(k)}: ${val || '-'}`).join(', ');
+                        return `[${idx + 1}] ${entries}`;
+                      }).join(' | ');
+                    } else {
+                      // Array of primitives
+                      row[columnName] = value.join(', ');
+                    }
+                  } else if (typeof value === 'object' && value !== null) {
+                    // Nested object - flatten recursively
+                    flattenItem(value, columnName);
+                  } else {
+                    row[columnName] = String(value);
+                  }
+                });
+              };
+              
+              flattenItem(item);
+              allRows.push(row);
+            });
           }
         });
 
-        if (excelData.length > 0) {
-          const worksheet = XLSX.utils.json_to_sheet(excelData);
-          
-          // Set column widths dynamically based on content
-          const cols = Object.keys(excelData[0]).map(key => {
-            const maxLength = Math.max(
-              key.length,
-              ...excelData.map(row => String(row[key] || '').length)
-            );
-            return { wch: Math.min(Math.max(maxLength, 10), 50) };
+        // Only create sheet if there's data
+        if (allRows.length > 0) {
+          // Add row numbers
+          allRows.forEach((row, idx) => {
+            row['No'] = idx + 1;
           });
-          worksheet['!cols'] = cols;
+          
+          // Reorder columns: No first, then common fields, then data fields
+          const orderedRows = allRows.map(row => {
+            const { No, Prodi, 'Tanggal Input': tanggalInput, 'Tanggal Update': tanggalUpdate, ...rest } = row;
+            return { No, Prodi, 'Tanggal Input': tanggalInput, 'Tanggal Update': tanggalUpdate, ...rest };
+          });
+
+          const worksheet = XLSX.utils.json_to_sheet(orderedRows);
+          
+          // Set column widths dynamically
+          if (orderedRows.length > 0) {
+            const cols = Object.keys(orderedRows[0]).map(key => {
+              const maxLength = Math.max(
+                key.length,
+                ...orderedRows.map(row => String(row[key] || '').length)
+              );
+              return { wch: Math.min(Math.max(maxLength, 10), 50) };
+            });
+            worksheet['!cols'] = cols;
+          }
 
           // Create sheet name (capitalize and limit to 31 chars for Excel)
           const sheetName = toTitleCase(type);
